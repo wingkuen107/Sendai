@@ -1,0 +1,614 @@
+﻿<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>2026東京仙台行程規劃 - 最終雲端版</title>
+    <!-- 載入 Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f7f9fc;
+        }
+        .itinerary-card {
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1), 0 1px 3px rgba(0, 0, 0, 0.08);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .itinerary-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 12px rgba(0, 0, 0, 0.15), 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+        /* 美化滾動條 */
+        .max-h-96::-webkit-scrollbar { width: 8px; }
+        .max-h-96::-webkit-scrollbar-thumb { background: #9ca3af; border-radius: 4px; }
+    </style>
+</head>
+<body class="p-4 sm:p-6 md:p-10">
+
+    <header class="text-center mb-10">
+        <h1 class="text-3xl sm:text-4xl font-extrabold text-blue-800">2026 東京 ↔ 仙台 ❄️ 行程規劃 (即時雲端版)</h1>
+        <p class="mt-2 text-lg text-gray-600">旅程日期: 2026/02/12 - 2026/02/24</p>
+        <p id="auth-status" class="mt-2 text-sm text-yellow-600">連線狀態: 正在初始化...</p>
+    </header>
+
+    <!-- 操作按鈕 -->
+    <div class="max-w-4xl mx-auto mb-8 flex flex-wrap justify-end space-x-2 sm:space-x-4">
+        <button id="add-activity-btn" class="mb-2 sm:mb-0 px-4 py-2 bg-pink-500 text-white font-semibold rounded-lg hover:bg-pink-600 transition duration-150 shadow-md disabled:opacity-50 text-sm" disabled>
+            + 新增測試活動 (展示即時更新)
+        </button>
+        <button id="save-itinerary-btn" class="mb-2 sm:mb-0 px-4 py-2 bg-green-600 text-white font-semibold rounded-lg hover:bg-green-700 transition duration-150 shadow-md disabled:opacity-50 text-sm" disabled>
+            💾 初始化/儲存行程至雲端
+        </button>
+    </div>
+
+    <div id="itinerary-container" class="space-y-8 max-w-4xl mx-auto">
+        <!-- 行程卡片將由 JavaScript 渲染到此處 -->
+        <p class="text-center text-gray-500 py-20">正在從雲端載入行程資料...</p>
+    </div>
+
+    <!-- 載入指示器 (Loading Indicator) -->
+    <div id="loading-spinner" class="fixed inset-0 bg-black bg-opacity-30 flex items-center justify-center z-50 hidden">
+        <div class="animate-spin rounded-full h-16 w-16 border-t-4 border-b-4 border-blue-500"></div>
+    </div>
+
+    <!-- 結果彈出視窗 (Modal) -->
+    <div id="result-modal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-40 hidden" onclick="hideModal()">
+        <div class="bg-white rounded-xl shadow-2xl p-6 w-11/12 max-w-lg mx-auto" onclick="event.stopPropagation()">
+            <h3 id="modal-title" class="text-xl font-bold mb-4 text-blue-700"></h3>
+            <div id="modal-content" class="max-h-96 overflow-y-auto text-gray-700 space-y-3">
+                <!-- 結果內容 -->
+            </div>
+            <div id="modal-sources" class="mt-4 border-t pt-3 text-sm text-gray-500">
+                <!-- 引用來源 -->
+            </div>
+            <button onclick="hideModal()" class="mt-6 w-full py-2 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition">關閉</button>
+        </div>
+    </div>
+
+    <script type="module">
+        // --- Firebase CDN 引入 ---
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        // 修正: 移除 setLogLevel，因為它不屬於 firebase-auth.js 導出
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- 全域變數 ---
+        // 環境變數 (Canvas 環境會提供)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        const apiKey = ""; // Gemini API Key
+
+        const API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent";
+        
+        let db;
+        let auth;
+        let userId = null;
+        let itinerary = []; // 全域行程資料，從 Firestore 同步
+        const ITINERARY_DOC_ID = '2026_Tokyo_Sendai';
+
+        // 設定 Firebase 日誌級別 (已移除 setLogLevel 導入和呼叫以避免 SyntaxError)
+        // setLogLevel('Debug');
+
+        // --- 輔助函數 ---
+
+        /**
+         * 顯示結果彈出視窗
+         */
+        function showModal(title, content, sources = []) {
+            document.getElementById('modal-title').innerText = title;
+            // 簡易 Markdown 換行處理
+            document.getElementById('modal-content').innerHTML = content.replace(/\n/g, '<br>');
+            
+            const sourcesContainer = document.getElementById('modal-sources');
+            sourcesContainer.innerHTML = '';
+            
+            if (sources.length > 0) {
+                const sourceTitle = document.createElement('p');
+                sourceTitle.classList.add('font-semibold', 'text-gray-600', 'mb-1');
+                sourceTitle.innerText = '引用來源:';
+                sourcesContainer.appendChild(sourceTitle);
+
+                const ul = document.createElement('ul');
+                ul.classList.add('list-disc', 'list-inside', 'space-y-1', 'pl-4');
+                sources.forEach((source, index) => {
+                    const li = document.createElement('li');
+                    li.innerHTML = `<a href="${source.uri}" target="_blank" class="text-blue-500 hover:text-blue-700 underline transition">${source.title || `來源 ${index + 1}`}</a>`;
+                    ul.appendChild(li);
+                });
+                sourcesContainer.appendChild(ul);
+            } else {
+                sourcesContainer.innerHTML = '<p class="text-gray-400">無外部引用來源。</p>';
+            }
+
+            document.getElementById('result-modal').classList.remove('hidden');
+        }
+
+        /**
+         * 隱藏結果彈出視窗
+         */
+        function hideModal() {
+            document.getElementById('result-modal').classList.add('hidden');
+        }
+
+        /**
+         * 顯示/隱藏載入指示器
+         */
+        function setLoading(show) {
+            document.getElementById('loading-spinner').classList.toggle('hidden', !show);
+        }
+
+        /**
+         * 使用 Gemini API 進行網路搜尋 (含指數退避重試)
+         */
+        async function fetchGeminiContent(userQuery, systemInstruction) {
+            setLoading(true);
+
+            for (let attempt = 0; attempt < 5; attempt++) {
+                try {
+                    const payload = {
+                        contents: [{ parts: [{ text: userQuery }] }],
+                        tools: [{ "google_search": {} }], // 啟用 Google Search 資訊接地
+                        systemInstruction: {
+                            parts: [{ text: systemInstruction }]
+                        },
+                    };
+
+                    const response = await fetch(`${API_URL}?key=${apiKey}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (response.status === 429 && attempt < 4) {
+                        // 處理頻率限制 (429 Too Many Requests)
+                        const delay = Math.pow(2, attempt) * 1000 + Math.random() * 1000;
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                        continue; // 進行下一次嘗試
+                    }
+
+                    if (!response.ok) {
+                        throw new Error(`API 錯誤: ${response.status} ${response.statusText}`);
+                    }
+
+                    const result = await response.json();
+                    const candidate = result.candidates?.[0];
+
+                    if (candidate && candidate.content?.parts?.[0]?.text) {
+                        const text = candidate.content.parts[0].text;
+                        let sources = [];
+                        const groundingMetadata = candidate.groundingMetadata;
+                        
+                        if (groundingMetadata && groundingMetadata.groundingAttributions) {
+                            sources = groundingMetadata.groundingAttributions
+                                .map(attribution => ({
+                                    uri: attribution.web?.uri,
+                                    title: attribution.web?.title,
+                                }))
+                                .filter(source => source.uri && source.title);
+                        }
+                        
+                        return { text, sources };
+                    }
+                    return null;
+
+                } catch (error) {
+                    console.error(`嘗試 ${attempt + 1} 失敗:`, error);
+                    if (attempt === 4) {
+                        setLoading(false);
+                        showModal("錯誤", "無法取得網路資訊。請檢查您的連線或稍後再試。");
+                        return null;
+                    }
+                    const delay = Math.pow(2, attempt) * 1000 + Math.random() * 1000;
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                }
+            }
+            setLoading(false);
+            return null;
+        }
+
+
+        /**
+         * 獲取地點圖片 URL (使用 placeholder)
+         */
+        function getImage(location) {
+            const width = 600;
+            const height = 400;
+            const color = '3a86ff';
+            const textColor = 'ffffff';
+            
+            let text = location;
+            if (location.includes('國際機場')) text = '機場';
+            if (location.includes('酒店') || location.includes('旅館')) text = '住宿';
+            if (location.includes('溫泉')) text = '溫泉';
+            if (location.includes('滑雪場') || location.includes('纜車')) text = '雪景';
+            if (location.includes('烤牛舌') || location.includes('壽喜燒')) text = '美食';
+
+            return `https://placehold.co/${width}x${height}/${color}/${textColor}?text=${encodeURIComponent(text)}`;
+        }
+
+        /**
+         * 獲取 Google 地圖連結
+         */
+        function getGoogleMapsLink(location) {
+            return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(location)}`;
+        }
+        
+        /**
+         * 處理 Tabelog 資訊查詢
+         */
+        async function handleTabelogSearch(restaurantName) {
+            const userQuery = `請在 Tabelog (日文版) 網站上搜尋「${restaurantName}」並提供該餐廳的簡要介紹、評分和直接連結 (URI/Title)。`;
+            const systemInstruction = "你是一位專門尋找日本美食網站 Tabelog 資訊的助理。請使用 Google Search 找到並總結所要求的餐廳資訊，並強調其 Tabelog 連結。所有連結必須包含在引用來源中。請以繁體中文回答。";
+            
+            const result = await fetchGeminiContent(userQuery, systemInstruction);
+            
+            if (result) {
+                showModal(`${restaurantName} - Tabelog 資訊`, result.text, result.sources);
+            }
+        }
+
+        /**
+         * 處理交通資訊查詢
+         */
+        async function handleTransportSearch(origin, destination) {
+            const userQuery = `請查詢 ${origin} 到 ${destination} 的最新交通路線，特別是新幹線/特急列車的時間和方法，並提供最快路線所需時間的估計。`;
+            const systemInstruction = "你是一位旅遊交通規劃專家。請使用 Google Search 尋找並總結起點到目的地之間的最佳鐵路或新幹線交通資訊，包括預計時間和主要轉乘站。請以繁體中文回答。";
+
+            const result = await fetchGeminiContent(userQuery, systemInstruction);
+
+            if (result) {
+                showModal(`${origin} → ${destination} - 交通資訊`, result.text, result.sources);
+            }
+        }
+
+        /**
+         * 處理每日摘要與服裝建議查詢 (使用 Gemini API)
+         */
+        async function handleDailyAdvice(date, dailyItems) {
+            const activities = dailyItems.map(item => item.location).join('、');
+            const dayOfWeek = new Date(date).toLocaleDateString('zh-TW', { weekday: 'long' });
+            
+            const userQuery = `請根據以下行程，為 ${date} (${dayOfWeek}) 提供詳細的每日摘要、預期天氣和服裝/裝備建議 (例如，是否需要滑雪裝備或正式服裝)。行程點：${activities}。`;
+            const systemInstruction = "你是一位專業的日本旅遊顧問。請使用 Google Search 獲取二月 (冬季) 東京/仙台/藏王地區的典型天氣預測，並基於提供的地點和活動 (如滑雪、溫泉、城市觀光) 總結每日重點和服裝建議。所有回覆必須使用繁體中文。";
+
+            const result = await fetchGeminiContent(userQuery, systemInstruction);
+
+            if (result) {
+                showModal(`${date} 每日建議與服裝`, result.text, result.sources);
+            }
+        }
+        
+        // --- Firestore 數據操作 ---
+
+        /**
+         * 定義 Firestore 公共文檔引用
+         */
+        function getItineraryDocRef() {
+            if (!db) {
+                console.error("Firestore 尚未初始化。");
+                return null;
+            }
+            // 公共行程資料路徑: /artifacts/{appId}/public/data/itineraries/{docId}
+            const path = `/artifacts/${appId}/public/data/itineraries/${ITINERARY_DOC_ID}`;
+            return doc(db, path);
+        }
+
+        /**
+         * 將當前的行程數據保存到 Firestore
+         */
+        async function saveItinerary() {
+            if (!userId) {
+                showModal("錯誤", "無法儲存：使用者身份尚未驗證。");
+                return;
+            }
+            const docRef = getItineraryDocRef();
+            if (!docRef) return;
+
+            setLoading(true);
+            try {
+                // 儲存行程陣列
+                await setDoc(docRef, { 
+                    itineraryData: itinerary,
+                    lastUpdated: new Date().toISOString(),
+                    updatedBy: userId 
+                });
+                showModal("成功", "行程數據已成功儲存到雲端！所有用戶的內容將會同步更新。");
+            } catch (e) {
+                console.error("儲存文件時發生錯誤:", e);
+                showModal("錯誤", `儲存行程失敗：${e.message}`);
+            } finally {
+                setLoading(false);
+            }
+        }
+        
+        /**
+         * 啟動 Firestore 即時監聽
+         */
+        function setupItineraryListener() {
+            const docRef = getItineraryDocRef();
+            if (!docRef) return;
+
+            const unsubscribe = onSnapshot(docRef, async (docSnap) => {
+                if (docSnap.exists() && docSnap.data().itineraryData) {
+                    // 數據存在，從 Firestore 加載
+                    itinerary = docSnap.data().itineraryData;
+                    console.log("從雲端載入行程數據。");
+                } else {
+                    // 數據不存在或第一次運行，使用初始硬編碼數據並提示保存
+                    console.log("雲端數據不存在，使用初始行程。");
+                    itinerary = getInitialItineraryData();
+                }
+                renderItinerary(); // 無論數據來源如何，都重新渲染
+            }, (error) => {
+                console.error("Firestore 監聽失敗:", error);
+                document.getElementById('itinerary-container').innerHTML = `<p class="text-center text-red-500 py-20">連線至資料庫失敗，請檢查連線。</p>`;
+            });
+
+            return unsubscribe;
+        }
+
+        /**
+         * 獲取初始行程數據 (用於首次存入 Firestore)
+         */
+        function getInitialItineraryData() {
+             return [
+                { date: '2026/02/12', day: '第1天', time: '08:30', location: '香港國際機場', duration: '停留 02時00分', type: 'flight', transport: '自行前往' },
+                { date: '2026/02/12', day: '第1天', time: '15:35', location: '成田國際機場', duration: '停留 01時30分', type: 'flight', transport: '航班抵達' },
+                { date: '2026/02/12', day: '第1天', time: '18:06', location: '東京蒙特埃馬納酒店', duration: '停留 01時00分', type: 'hotel', transport: '搭乘 N’EX 或 機場巴士' },
+                { date: '2026/02/13', day: '第2天', time: '09:00', location: '東京蒙特埃馬納酒店', duration: '停留 00時00分', type: 'hotel', transport: '步行至車站' },
+                { date: '2026/02/13', day: '第2天', time: '10:40', location: '仙台大都會大飯店', duration: '停留 00時20分', type: 'hotel', transport: '新幹線：東京站 - 仙台站 (需時約1.5小時)', isMajorTransport: true },
+                { date: '2026/02/13', day: '第2天', time: '11:06', location: '寶可夢中心 Pokémon Center Tohoku', duration: '停留 01時00分', type: 'attraction', transport: '步行' },
+                { date: '2026/02/13', day: '第2天', time: '12:09', location: '烤牛舌 善治郎 仙台站前本店', duration: '停留 01時00分', type: 'restaurant', transport: '步行' },
+                { date: '2026/02/14', day: '第3天', time: '08:00', location: '仙台大都會大飯店', duration: '停留 01時00分', type: 'hotel', transport: '步行至車站' },
+                { date: '2026/02/14', day: '第3天', time: '09:06', location: '仙台朝市', duration: '停留 01時00分', type: 'attraction', transport: '步行' },
+                { date: '2026/02/14', day: '第3天', time: '10:06', location: '牛たん料理 閣 ブランドーム本店', duration: '停留 01時00分', type: 'restaurant', transport: '步行' },
+                { date: '2026/02/15', day: '第4天', time: '07:30', location: '仙台大都會大飯店', duration: '停留 00時30分', type: 'hotel', transport: '退房' },
+                { date: '2026/02/15', day: '第4天', time: '09:25', location: 'Zao Onsen', duration: '停留 01時00分', type: 'attraction', transport: '新幹線+巴士：仙台 - 山形，轉搭巴士至藏王溫泉', isMajorTransport: true },
+                { date: '2026/02/15', day: '第4天', time: '10:40', location: '最上高湯七乃湯大平酒店', duration: '停留 01時00分', type: 'hotel', transport: '巴士抵達' },
+                { date: '2026/02/16', day: '第5天', time: '08:00', location: '最上高湯七乃湯大平酒店', duration: '停留 01時00分', type: 'hotel', transport: '出發' },
+                { date: '2026/02/16', day: '第5天', time: '09:13', location: '藏王溫泉滑雪場', duration: '停留 01時00分', type: 'attraction', transport: '步行/接駁車' },
+                { date: '2026/02/17', day: '第6天', time: '08:00', location: '最上高湯七乃湯大平酒店', duration: '停留 01時00分', type: 'hotel', transport: '出發' },
+                { date: '2026/02/17', day: '第6天', time: '09:13', location: '藏王溫泉滑雪場', duration: '停留 01時00分', type: 'attraction', transport: '步行/接駁車' },
+                { date: '2026/02/18', day: '第7天', time: '08:00', location: '最上高湯七乃湯大平酒店', duration: '停留 01時00分', type: 'hotel', transport: '出發' },
+                { date: '2026/02/18', day: '第7天', time: '09:15', location: '藏王纜車山麓站', duration: '停留 01時00分', type: 'attraction', transport: '步行/接駁車' },
+                { date: '2026/02/18', day: '第7天', time: '10:15', location: '藏王纜車 樹冰高原站', duration: '停留 01時00分', type: 'attraction', transport: '纜車' },
+                { date: '2026/02/18', day: '第7天', time: '11:15', location: '藏王纜車 地藏山頂站', duration: '停留 01時00分', type: 'attraction', transport: '纜車' },
+                { date: '2026/02/18', day: '第7天', time: '13:44', location: '旅館藤屋', duration: '停留 01時00分', type: 'hotel', transport: '步行或當地交通' },
+                { date: '2026/02/19', day: '第8天', time: '08:00', location: '旅館藤屋', duration: '停留 01時00分', type: 'hotel', transport: '退房' },
+                { date: '2026/02/19', day: '第8天', time: '15:44', location: 'Karaku, Gora', duration: '停留 01時00分', type: 'hotel', transport: '新幹線+特急：山形/米沢 - 小田原 - 強羅 (需時較長)', isMajorTransport: true },
+                { date: '2026/02/20', day: '第9天', time: '08:00', location: 'Karaku, Gora', duration: '停留 01時00分', type: 'hotel', transport: '退房' },
+                { date: '2026/02/20', day: '第9天', time: '10:41', location: 'JR-EAST HOTEL METS PREMIER AKIHABARA', duration: '停留 01時00分', type: 'hotel', transport: '箱根登山線 - 小田原 - JR至秋葉原' },
+                { date: '2026/02/20', day: '第9天', time: '11:41', location: '伊吹 壽喜燒', duration: '停留 01時00分', type: 'restaurant', transport: '步行' },
+                { date: '2026/02/21', day: '第10天', time: '08:00', location: 'JR-EAST HOTEL METS PREMIER AKIHABARA', duration: '停留 01時00分', type: 'hotel', transport: '出發' },
+                { date: '2026/02/21', day: '第10天', time: '09:56', location: '讀賣樂園', duration: '停留 01時00分', type: 'attraction', transport: 'JR+京王線' },
+                { date: '2026/02/22', day: '第11天', time: '08:00', location: 'JR-EAST HOTEL METS PREMIER AKIHABARA', duration: '停留 01時00分', type: 'hotel', transport: '全日東京自由活動' },
+                { date: '2026/02/23', day: '第12天', time: '08:00', location: 'JR-EAST HOTEL METS PREMIER AKIHABARA', duration: '停留 01時00分', type: 'hotel', transport: '全日東京自由活動' },
+                { date: '2026/02/24', day: '第13天', time: '08:00', location: 'JR-EAST HOTEL METS PREMIER AKIHABARA', duration: '停留 01時00分', type: 'hotel', transport: '退房' },
+                { date: '2026/02/24', day: '第13天', time: '19:30', location: '成田國際機場', duration: '停留 02時00分', type: 'flight', transport: 'N’EX 或 機場巴士' },
+                { date: '2026/02/24', day: '第13天', time: '02:00', location: '香港國際機場', duration: '停留 01時00分', type: 'flight', transport: '航班抵達' },
+            ];
+        }
+
+        /**
+         * 處理新增測試活動
+         */
+        function handleAddTestActivity() {
+            // 找到最後一天的索引
+            const lastDayIndex = itinerary.length - 1;
+
+            // 新增一個測試活動到最後一天 (2026/02/24)
+            const newActivity = {
+                date: '2026/02/24',
+                day: '第13天',
+                time: new Date().toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', hour12: false }), // 使用當前時間
+                location: '【新活動】即時同步測試點',
+                duration: '停留 00時10分',
+                type: 'attraction',
+                transport: '步行 (新增測試)',
+            };
+            
+            // 插入到倒數第二個位置 (在離開機場前)
+            itinerary.splice(lastDayIndex - 1, 0, newActivity);
+
+            // 儲存到雲端，觸發即時更新
+            saveItinerary();
+        }
+
+        // --- 渲染功能 ---
+        
+        /**
+         * 渲染單一行程卡片
+         */
+        function renderItineraryItem(item) {
+            let actionButton = '';
+            
+            if (item.type === 'restaurant') {
+                actionButton = `
+                    <button 
+                        onclick="handleTabelogSearch('${item.location}')" 
+                        class="mt-2 w-full sm:w-auto px-4 py-2 bg-yellow-500 text-white font-semibold rounded-lg hover:bg-yellow-600 transition duration-150 shadow-md text-sm whitespace-nowrap"
+                    >
+                        尋找 Tabelog 資訊 (日文版)
+                    </button>
+                `;
+            }
+
+            if (item.isMajorTransport) {
+                // 尋找前一個活動點作為起點
+                const prevItem = itinerary.find(i => i.date === item.date && i.time < item.time && i.type !== 'flight');
+                if (prevItem) {
+                    actionButton = `
+                        <button 
+                            onclick="handleTransportSearch('${prevItem.location}', '${item.location}')" 
+                            class="mt-2 w-full sm:w-auto px-4 py-2 bg-indigo-600 text-white font-semibold rounded-lg hover:bg-indigo-700 transition duration-150 shadow-md text-sm whitespace-nowrap"
+                        >
+                            查看即時交通/新幹線資訊
+                        </button>
+                    `;
+                }
+            }
+
+
+            return `
+                <div class="flex items-start space-x-4">
+                    <div class="flex flex-col items-center">
+                        <div class="w-2.5 h-2.5 bg-blue-500 rounded-full ring-4 ring-blue-200"></div>
+                        <div class="h-16 w-0.5 bg-blue-300"></div>
+                    </div>
+                    <div class="itinerary-card bg-white p-4 rounded-xl flex-grow md:flex md:items-center md:space-x-4 mb-4">
+                        <div class="md:w-1/4">
+                            <p class="text-lg font-bold text-gray-800">${item.time}</p>
+                            <p class="text-sm text-gray-500">停留: ${item.duration.replace('停留 ', '')}</p>
+                        </div>
+                        <div class="md:w-3/4">
+                            <h4 class="text-xl font-semibold text-blue-700 hover:text-blue-900 transition mb-1">
+                                <a href="${getGoogleMapsLink(item.location)}" target="_blank" rel="noopener noreferrer">
+                                    ${item.location}
+                                </a>
+                            </h4>
+                            <p class="text-base text-gray-600 mb-2">
+                                <span class="font-medium text-indigo-500">${item.transport}</span>
+                            </p>
+                            
+                            <!-- 圖片佔位符和按鈕 -->
+                            <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between space-y-2 sm:space-y-0 sm:space-x-4">
+                                <img src="${getImage(item.location)}" alt="${item.location} 圖片佔位符" 
+                                     class="w-full h-32 object-cover rounded-lg sm:w-48 border border-gray-200" 
+                                     onerror="this.onerror=null; this.src='https://placehold.co/400x300/e5e7eb/4b5563?text=圖片載入失敗'" />
+                                ${actionButton}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        /**
+         * 渲染整個行程表
+         */
+        function renderItinerary() {
+            const container = document.getElementById('itinerary-container');
+            // 檢查行程列表是否為空
+            if (itinerary.length === 0) {
+                 container.innerHTML = '<p class="text-center text-gray-500 py-20">雲端行程資料庫為空，請點擊「💾 初始化/儲存行程至雲端」。</p>';
+                 return;
+            }
+
+            let html = '';
+            
+            // 按日期分組行程項目
+            const days = itinerary.reduce((acc, item) => {
+                const dateKey = `${item.day} (${item.date})`;
+                if (!acc[dateKey]) {
+                    acc[dateKey] = [];
+                }
+                acc[dateKey].push(item);
+                return acc;
+            }, {});
+
+            // 渲染每個日期的行程
+            for (const [dayHeader, items] of Object.entries(days)) {
+                const dateMatch = dayHeader.match(/\((\d{4}\/\d{2}\/\d{2})\)/);
+                const dateString = dateMatch ? dateMatch[1] : '';
+
+                // 將當日行程項目陣列轉換為 JSON 字串並轉義引號，以便傳遞給 onclick
+                const itemsJson = JSON.stringify(items).replace(/"/g, '&quot;');
+
+                html += `
+                    <div class="day-section">
+                        <div class="flex flex-col sm:flex-row sm:justify-between sm:items-center py-4 px-3 bg-blue-100 rounded-lg sticky top-0 z-10 shadow-sm border-l-4 border-blue-500 mb-6">
+                            <h2 class="text-xl sm:text-2xl font-bold text-gray-700">
+                                ${dayHeader}
+                            </h2>
+                            <button 
+                                onclick="handleDailyAdvice('${dateString}', '${itemsJson}')" 
+                                class="mt-2 sm:mt-0 px-3 py-1 bg-green-500 text-white font-semibold rounded-lg hover:bg-green-600 transition duration-150 shadow-md text-sm whitespace-nowrap flex items-center justify-center"
+                            >
+                                ✨ 每日建議與服裝
+                            </button>
+                        </div>
+                        <div class="timeline-group ml-1">
+                            ${items.map(renderItineraryItem).join('')}
+                        </div>
+                    </div>
+                `;
+            }
+
+            container.innerHTML = html;
+
+            // 重新綁定事件處理函數到 window
+            window.handleDailyAdvice = (date, itemsJson) => {
+                try {
+                    const items = JSON.parse(itemsJson);
+                    handleDailyAdvice(date, items);
+                } catch (e) {
+                    console.error("解析每日行程數據失敗:", e);
+                }
+            };
+        }
+
+        // --- Firebase 初始化和認證 ---
+        async function initFirebase() {
+            if (!Object.keys(firebaseConfig).length) {
+                console.error("Firebase 配置資訊缺失。");
+                document.getElementById('auth-status').innerText = "連線狀態: 錯誤 (Firebase 配置缺失)";
+                return;
+            }
+
+            const app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+
+            document.getElementById('auth-status').innerText = "連線狀態: 正在驗證身份...";
+            
+            try {
+                // 優先使用自定義 token 進行身份驗證
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    // 如果沒有 token，則進行匿名登入
+                    await signInAnonymously(auth);
+                }
+
+                userId = auth.currentUser?.uid || 'anonymous-user';
+                document.getElementById('auth-status').innerText = `連線狀態: 已連線 (用戶 ID: ${userId})`;
+                
+                // 啟用按鈕
+                document.getElementById('save-itinerary-btn').disabled = false;
+                document.getElementById('add-activity-btn').disabled = false;
+
+                // 身份驗證完成後，啟動即時資料監聽
+                setupItineraryListener();
+
+            } catch (error) {
+                console.error("Firebase 身份驗證失敗:", error);
+                document.getElementById('auth-status').innerText = `連線狀態: 身份驗證失敗 (${error.code})`;
+            }
+        }
+
+        // --- 應用程式啟動 ---
+        document.addEventListener('DOMContentLoaded', () => {
+            // 綁定儲存和新增活動的事件
+            document.getElementById('save-itinerary-btn').addEventListener('click', () => {
+                // 如果是第一次儲存，使用初始數據
+                if (itinerary.length === 0) {
+                    itinerary = getInitialItineraryData();
+                }
+                saveItinerary();
+            });
+            document.getElementById('add-activity-btn').addEventListener('click', handleAddTestActivity);
+
+            // 暴露公共函數 (供 HTML 內聯事件使用)
+            window.handleTabelogSearch = handleTabelogSearch;
+            window.handleTransportSearch = handleTransportSearch;
+            window.hideModal = hideModal;
+            
+            initFirebase();
+        });
+    </script>
+
+</body>
+</html>
